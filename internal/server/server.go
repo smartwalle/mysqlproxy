@@ -5,8 +5,8 @@ import (
 	"log"
 	"net"
 
-	"mysqlproxy/internal/config"
-	"mysqlproxy/internal/session"
+	"github.com/smartwalle/mysqlproxy/internal/config"
+	"github.com/smartwalle/mysqlproxy/internal/session"
 )
 
 // Server TCP 代理服务。

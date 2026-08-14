@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net"
 
-	"mysqlproxy/internal/config"
+	"github.com/smartwalle/mysqlproxy/internal/config"
 )
 
 // Connector 负责建立到后端 MySQL 的连接。

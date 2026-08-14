@@ -3,8 +3,8 @@ package main
 import (
 	"log"
 
-	"mysqlproxy/internal/config"
-	"mysqlproxy/internal/server"
+	"github.com/smartwalle/mysqlproxy/internal/config"
+	"github.com/smartwalle/mysqlproxy/internal/server"
 )
 
 func main() {

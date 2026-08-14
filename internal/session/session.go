@@ -6,10 +6,10 @@ import (
 	"net"
 	"sync"
 
-	"mysqlproxy/internal/auth"
-	"mysqlproxy/internal/backend"
-	"mysqlproxy/internal/config"
-	"mysqlproxy/internal/protocol"
+	"github.com/smartwalle/mysqlproxy/internal/auth"
+	"github.com/smartwalle/mysqlproxy/internal/backend"
+	"github.com/smartwalle/mysqlproxy/internal/config"
+	"github.com/smartwalle/mysqlproxy/internal/protocol"
 )
 
 // Session 代表一次客户端连接。
@@ -86,11 +86,8 @@ func (s *Session) authenticate() error {
 	s.Username = username
 	s.Database = database
 
-	// 客户端发送的是对 scramble 计算的 token，反向无法还原明文密码，
-	// 因此这里用代理配置的密码同样计算 token 后比较。
-	expected := protocol.ComputePasswordToken(s.cfg.Auth.Password, s.scramble)
-	if !equalBytes(expected, authResponse) {
-		return fmt.Errorf("password mismatch")
+	if err = s.auth.Authenticate(username, authResponse, s.scramble); err != nil {
+		return err
 	}
 
 	return nil
@@ -212,15 +209,4 @@ func (s *Session) Close() {
 	if s.Backend != nil {
 		_ = s.Backend.Close()
 	}
-}
-
-func equalBytes(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var diff byte
-	for i := range a {
-		diff |= a[i] ^ b[i]
-	}
-	return diff == 0
 }

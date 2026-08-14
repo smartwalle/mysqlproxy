@@ -1,4 +1,4 @@
-module mysqlproxy
+module github.com/smartwalle/mysqlproxy
 
 go 1.18
 
