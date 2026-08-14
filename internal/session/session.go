@@ -63,8 +63,14 @@ func (s *Session) Run() {
 }
 
 // handshake 向客户端发送初始握手包，并保存随机数用于认证。
+//
+// 对外声明 mysql_native_password 以保持最大兼容性（所有 MySQL 客户端均支持）。
+// 代理已同时支持 caching_sha2_password 认证：
+//   - 方向 A（代理连后端）：根据后端握手包声明的插件自动选择算法；
+//   - 方向 B（客户端连代理）：若客户端握手响应请求 caching_sha2，代理按
+//     对应算法校验，并支持 full auth（RSA 公钥交换）。
 func (s *Session) handshake() error {
-	payload, scramble := protocol.BuildHandshakeV10()
+	payload, scramble := protocol.BuildHandshakeV10(protocol.AuthNativePassword)
 	if err := protocol.WritePacket(s.Client, 0, payload); err != nil {
 		return fmt.Errorf("write handshake: %w", err)
 	}
@@ -79,21 +85,80 @@ func (s *Session) authenticate() error {
 		return fmt.Errorf("read handshake response: %w", err)
 	}
 
-	username, authResponse, database, err := protocol.ParseHandshakeResponse(pkt.Payload)
+	username, authResponse, database, authPlugin, err := protocol.ParseHandshakeResponse(pkt.Payload)
 	if err != nil {
 		return err
 	}
 	s.Username = username
 	s.Database = database
 
-	if err = s.auth.Authenticate(username, authResponse, s.scramble); err != nil {
+	// 先校验用户名（无论插件）。
+	if err := s.auth.VerifyUsername(username); err != nil {
 		return err
 	}
 
-	return nil
+	// 尝试 fast auth：比较 token。
+	if err := s.auth.Authenticate(username, authResponse, s.scramble, authPlugin); err == nil {
+		return nil
+	}
+
+	// fast auth 失败。若客户端使用 caching_sha2，走 full auth（RSA 公钥交换）。
+	if authPlugin == protocol.AuthCachingSHA2Password {
+		return s.clientFullAuth(username)
+	}
+
+	return fmt.Errorf("auth failed: %w", err)
+}
+
+// clientFullAuth 执行 caching_sha2_password 的完整认证（服务端角色）：
+// 回 0x01 0x04 要求完整认证，处理客户端请求公钥（0x02），返回 RSA 公钥，
+// 解密客户端发来的加密密码并与配置密码比对。
+func (s *Session) clientFullAuth(username string) error {
+	// 1. 回 0x01 0x04，要求完整认证。
+	if err := protocol.WritePacket(s.Client, 2, []byte{protocol.CachingSHA2AuthMoreData, protocol.CachingSHA2PerformFullAuth}); err != nil {
+		return fmt.Errorf("write perform full auth: %w", err)
+	}
+
+	// 2. 读客户端请求（期望 0x02 请求公钥）。
+	req, err := protocol.ReadPacket(s.Client)
+	if err != nil {
+		return fmt.Errorf("read client request: %w", err)
+	}
+	if len(req.Payload) == 0 || req.Payload[0] != protocol.CachingSHA2RequestPublicKey {
+		return fmt.Errorf("unexpected client request: 0x%x", req.Payload)
+	}
+
+	// 3. 返回 RSA 公钥（AuthMoreData 0x01 + PEM 公钥）。
+	privKey, err := protocol.GetServerRSAKey()
+	if err != nil {
+		return fmt.Errorf("get server rsa key: %w", err)
+	}
+	pubPEM := protocol.EncodePublicKey(&privKey.PublicKey)
+	keyPacket := append([]byte{protocol.CachingSHA2AuthMoreData}, pubPEM...)
+	if err := protocol.WritePacket(s.Client, 4, keyPacket); err != nil {
+		return fmt.Errorf("write public key: %w", err)
+	}
+
+	// 4. 读客户端发来的加密密码。
+	enc, err := protocol.ReadPacket(s.Client)
+	if err != nil {
+		return fmt.Errorf("read encrypted password: %w", err)
+	}
+
+	// 5. 解密得到明文密码并校验。
+	plainPassword, err := protocol.CachingSHA2DecryptPassword(enc.Payload, s.scramble, privKey)
+	if err != nil {
+		return fmt.Errorf("decrypt password: %w", err)
+	}
+
+	return s.auth.VerifyPassword(username, plainPassword)
 }
 
 // connectBackend 代理作为客户端，用真实 MySQL 账号与后端完成完整握手。
+//
+// 支持 mysql_native_password 与 caching_sha2_password 两种认证插件，
+// 根据后端握手包声明的 auth-plugin-name 自动选择算法；caching_sha2 缓存
+// 未命中时执行 full auth（请求公钥 + RSA 加密密码）。
 func (s *Session) connectBackend() error {
 	conn, err := s.connector.Connect()
 	if err != nil {
@@ -107,18 +172,24 @@ func (s *Session) connectBackend() error {
 		return fmt.Errorf("read backend handshake: %w", err)
 	}
 
-	// 2. 从后端握手包解析 scramble。
-	scramble, err := protocol.ParseServerHandshake(pkt.Payload)
+	// 2. 从后端握手包解析 scramble 与认证插件。
+	hs, err := protocol.ParseServerHandshake(pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("parse backend handshake: %w", err)
+	}
+
+	authPlugin := hs.AuthPlugin
+	if authPlugin == "" {
+		authPlugin = protocol.AuthNativePassword
 	}
 
 	// 3. 构造认证响应包，用真实 MySQL 账号密码。
 	authResp := protocol.BuildHandshakeResponse(
 		s.cfg.MySQL.Username,
 		s.cfg.MySQL.Password,
-		scramble,
+		hs.Scramble,
 		"",
+		authPlugin,
 	)
 
 	// 4. 发送认证响应（sequence 1）。
@@ -126,7 +197,7 @@ func (s *Session) connectBackend() error {
 		return fmt.Errorf("write backend auth response: %w", err)
 	}
 
-	// 5. 读后端认证结果（sequence 2），必须为 OK 包。
+	// 5. 读后端认证结果。
 	result, err := protocol.ReadPacket(s.Backend)
 	if err != nil {
 		return fmt.Errorf("read backend auth result: %w", err)
@@ -134,8 +205,65 @@ func (s *Session) connectBackend() error {
 	if len(result.Payload) == 0 || result.Payload[0] == 0xff {
 		return fmt.Errorf("backend auth failed: %s", string(result.Payload))
 	}
-	if result.Payload[0] != 0x00 {
+
+	// 6. caching_sha2 缓存未命中时，后端返回 0x01 0x04 要求 full auth。
+	if len(result.Payload) >= 2 &&
+		result.Payload[0] == protocol.CachingSHA2AuthMoreData &&
+		result.Payload[1] == protocol.CachingSHA2PerformFullAuth {
+		if err := s.backendFullAuth(hs.Scramble); err != nil {
+			return err
+		}
+	} else if result.Payload[0] != 0x00 {
 		return fmt.Errorf("backend unexpected auth result: 0x%02x", result.Payload[0])
+	}
+
+	return nil
+}
+
+// backendFullAuth 执行 caching_sha2_password 的完整认证：
+// 发送 0x02 请求公钥，读取后端返回的 RSA 公钥，用公钥加密密码后发送。
+func (s *Session) backendFullAuth(scramble []byte) error {
+	// 请求公钥。
+	if err := protocol.WritePacket(s.Backend, 3, []byte{protocol.CachingSHA2RequestPublicKey}); err != nil {
+		return fmt.Errorf("request backend public key: %w", err)
+	}
+
+	// 读后端返回的公钥（AuthMoreData 0x01 + PEM 公钥）。
+	pkt, err := protocol.ReadPacket(s.Backend)
+	if err != nil {
+		return fmt.Errorf("read backend public key: %w", err)
+	}
+	pubPEM := pkt.Payload
+	if len(pubPEM) > 0 && pubPEM[0] == protocol.CachingSHA2AuthMoreData {
+		pubPEM = pubPEM[1:]
+	}
+
+	pubKey, err := protocol.ParsePublicKey(pubPEM)
+	if err != nil {
+		return fmt.Errorf("parse backend public key: %w", err)
+	}
+
+	// 用公钥加密密码。
+	encrypted, err := protocol.CachingSHA2EncryptPassword(s.cfg.MySQL.Password, scramble, pubKey)
+	if err != nil {
+		return fmt.Errorf("encrypt password: %w", err)
+	}
+
+	// 发送加密后的密码。
+	if err := protocol.WritePacket(s.Backend, 4, encrypted); err != nil {
+		return fmt.Errorf("write encrypted password: %w", err)
+	}
+
+	// 读最终认证结果，必须为 OK 包。
+	result, err := protocol.ReadPacket(s.Backend)
+	if err != nil {
+		return fmt.Errorf("read backend auth result after full auth: %w", err)
+	}
+	if len(result.Payload) == 0 || result.Payload[0] == 0xff {
+		return fmt.Errorf("backend auth failed: %s", string(result.Payload))
+	}
+	if result.Payload[0] != 0x00 {
+		return fmt.Errorf("backend unexpected auth result after full auth: 0x%02x", result.Payload[0])
 	}
 
 	return nil

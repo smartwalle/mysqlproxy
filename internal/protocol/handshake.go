@@ -82,7 +82,10 @@ const (
 
 // BuildHandshakeV10 构造初始握手包（protocol 10），
 // 返回握手包 payload 与用于密码认证的 20 字节 scramble。
-func BuildHandshakeV10() ([]byte, []byte) {
+//
+// authPlugin 指定对外声明的默认认证插件（mysql_native_password 或
+// caching_sha2_password）。
+func BuildHandshakeV10(authPlugin string) ([]byte, []byte) {
 	payload := make([]byte, 0, 128)
 
 	payload = append(payload, 0x0a) // protocol version 10
@@ -115,7 +118,7 @@ func BuildHandshakeV10() ([]byte, []byte) {
 	// auth-plugin-data-part-2（12 字节有效数据 + 1 字节 0x00 结尾 = 13 字节）。
 	payload = append(payload, authData[8:]...)
 
-	payload = append(payload, mysqlNativePassword...)
+	payload = append(payload, authPlugin...)
 	payload = append(payload, 0x00)
 
 	// scramble = part1(8) + part2 有效 12 字节（去掉末尾 0x00）。
@@ -126,8 +129,15 @@ func BuildHandshakeV10() ([]byte, []byte) {
 	return payload, scramble
 }
 
-// ParseServerHandshake 从服务端握手包 payload 中提取 scramble（20 字节）。
-func ParseServerHandshake(payload []byte) ([]byte, error) {
+// ServerHandshake 从服务端握手包解析出的关键信息。
+type ServerHandshake struct {
+	Scramble   []byte // 20 字节认证盐值
+	AuthPlugin string // 认证插件名（如 mysql_native_password / caching_sha2_password）
+	Capability uint32 // 服务端能力标志
+}
+
+// ParseServerHandshake 从服务端握手包 payload 中提取 scramble、认证插件与能力标志。
+func ParseServerHandshake(payload []byte) (*ServerHandshake, error) {
 	if len(payload) < 1 || payload[0] != 0x0a {
 		return nil, errors.New("protocol: not a protocol 10 handshake")
 	}
@@ -148,31 +158,65 @@ func ParseServerHandshake(payload []byte) ([]byte, error) {
 	pos += 8
 	pos++ // filler
 
-	// capability lower(2) + charset(1) + status(2) + capability upper(2)
-	// + auth data len(1) + reserved(10)
-	pos += 2 + 1 + 2 + 2 + 1 + 10
+	// capability lower (2 bytes)
+	capLower := binary.LittleEndian.Uint16(payload[pos : pos+2])
+	pos += 2
+	pos += 1 // charset
+	pos += 2 // status
+
+	// capability upper (2 bytes)
+	capUpper := binary.LittleEndian.Uint16(payload[pos : pos+2])
+	pos += 2
+	capability := uint32(capLower) | uint32(capUpper)<<16
+
+	pos += 1  // auth-plugin-data length
+	pos += 10 // reserved
 
 	if pos+12 > len(payload) {
 		return nil, errors.New("protocol: handshake part2 too short")
 	}
 	part2 := payload[pos : pos+12]
+	pos += 13 // part2 共 13 字节（12 有效 + 1 结尾 0x00）
 
 	scramble := make([]byte, 20)
 	copy(scramble[:8], part1)
 	copy(scramble[8:], part2)
-	return scramble, nil
+
+	// auth-plugin-name（null 终止），仅在声明 CLIENT_PLUGIN_AUTH 时存在。
+	authPlugin := ""
+	if capability&clientPluginAuth != 0 && pos < len(payload) {
+		name, _, err := readNullTerminated(payload[pos:])
+		if err == nil {
+			authPlugin = name
+		}
+	}
+
+	return &ServerHandshake{
+		Scramble:   scramble,
+		AuthPlugin: authPlugin,
+		Capability: capability,
+	}, nil
 }
 
 // BuildHandshakeResponse 构造客户端握手响应包（HandshakeResponse41）。
 //
+// authPlugin 指定认证插件名，决定 auth response 的计算方式：
+//   - mysql_native_password：20 字节 SHA1 token
+//   - caching_sha2_password：32 字节 SHA256 token
+//
 // database 为空时表示不设置 CLIENT_CONNECT_WITH_DB。
-func BuildHandshakeResponse(username, password string, scramble []byte, database string) []byte {
+func BuildHandshakeResponse(username, password string, scramble []byte, database, authPlugin string) []byte {
 	capability := uint32(clientCapabilities)
 	if database != "" {
 		capability |= clientConnectWithDB
 	}
 
-	authResp := ComputePasswordToken(password, scramble)
+	var authResp []byte
+	if authPlugin == AuthCachingSHA2Password {
+		authResp = ComputeCachingSHA2Token(password, scramble)
+	} else {
+		authResp = ComputePasswordToken(password, scramble)
+	}
 
 	payload := make([]byte, 0, 128)
 	payload = binary.LittleEndian.AppendUint32(payload, capability)         // capability (4)
@@ -182,25 +226,25 @@ func BuildHandshakeResponse(username, password string, scramble []byte, database
 	payload = append(payload, username...)
 	payload = append(payload, 0x00) // username null terminator
 	// auth response 长度：因声明了 CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA，
-	// 使用 length-encoded integer 编码（20 字节时即单字节 0x14）。
+	// 使用 length-encoded integer 编码。
 	payload = appendLengthEncodedInt(payload, uint64(len(authResp)))
 	payload = append(payload, authResp...)
 	if database != "" {
 		payload = append(payload, database...)
 		payload = append(payload, 0x00)
 	}
-	payload = append(payload, mysqlNativePassword...)
+	payload = append(payload, authPlugin...)
 	payload = append(payload, 0x00)
 
 	return payload
 }
 
-// ParseHandshakeResponse 解析客户端握手响应包，返回用户名、认证数据与数据库名。
+// ParseHandshakeResponse 解析客户端握手响应包，返回用户名、认证数据、数据库名与认证插件名。
 //
-// 返回顺序：username, authResponse, database。
-func ParseHandshakeResponse(payload []byte) (string, []byte, string, error) {
+// 返回顺序：username, authResponse, database, authPlugin。
+func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, error) {
 	if len(payload) < 32 {
-		return "", nil, "", errors.New("protocol: handshake response too short")
+		return "", nil, "", "", errors.New("protocol: handshake response too short")
 	}
 
 	pos := 0
@@ -221,12 +265,13 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, error) {
 	// username (null-terminated)
 	username, n, err := readNullTerminated(payload[pos:])
 	if err != nil {
-		return "", nil, "", err
+		return "", nil, "", "", err
 	}
 	pos += n
 
 	var authResponse []byte
 	var database string
+	var authPlugin string
 
 	// auth response 的长度编码方式：
 	//   - CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA：length-encoded integer 前缀
@@ -238,7 +283,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, error) {
 		var ok bool
 		authLen, pos, ok = readLengthEncodedInt(payload, pos)
 		if !ok || pos+int(authLen) > len(payload) {
-			return "", nil, "", errors.New("protocol: invalid auth response length")
+			return "", nil, "", "", errors.New("protocol: invalid auth response length")
 		}
 		authResponse = payload[pos : pos+int(authLen)]
 		pos += int(authLen)
@@ -248,7 +293,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, error) {
 		authLen := int(payload[pos])
 		pos++
 		if pos+authLen > len(payload) {
-			return "", nil, "", errors.New("protocol: invalid auth response length")
+			return "", nil, "", "", errors.New("protocol: invalid auth response length")
 		}
 		authResponse = payload[pos : pos+authLen]
 		pos += authLen
@@ -258,22 +303,30 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, error) {
 		var authStr string
 		authStr, n, err = readNullTerminated(payload[pos:])
 		if err != nil {
-			return "", nil, "", err
+			return "", nil, "", "", err
 		}
 		authResponse = []byte(authStr)
 		pos += n
 	}
 
-	// database (null-terminated)，设置了 CLIENT_CONNECT_WITH_DB 时存在。
-	if pos < len(payload) && payload[pos] != 0x00 {
+	// database (null-terminated)，仅在设置了 CLIENT_CONNECT_WITH_DB 时存在。
+	if capability&clientConnectWithDB != 0 && pos < len(payload) {
 		database, n, err = readNullTerminated(payload[pos:])
 		if err != nil {
-			return "", nil, "", err
+			return "", nil, "", "", err
 		}
 		pos += n
 	}
 
-	return username, authResponse, database, nil
+	// auth-plugin-name (null-terminated)，设置了 CLIENT_PLUGIN_AUTH 时存在。
+	if capability&clientPluginAuth != 0 && pos < len(payload) {
+		authPlugin, _, err = readNullTerminated(payload[pos:])
+		if err != nil {
+			return "", nil, "", "", err
+		}
+	}
+
+	return username, authResponse, database, authPlugin, nil
 }
 
 // ComputePasswordToken 计算 mysql_native_password 的认证 token：
