@@ -61,9 +61,6 @@ func Load() (*Config, error) {
 	if cfg.MySQL.Username == "" {
 		return nil, fmt.Errorf("MYSQL_USERNAME is required")
 	}
-	if cfg.MySQL.Password == "" {
-		return nil, fmt.Errorf("MYSQL_PASSWORD is required")
-	}
 
 	return cfg, nil
 }
