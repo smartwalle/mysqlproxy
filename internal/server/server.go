@@ -1,17 +1,25 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/smartwalle/mysqlproxy/internal/config"
 	"github.com/smartwalle/mysqlproxy/internal/session"
 )
 
-// Server TCP 代理服务。
+// Server TCP 代理服务，实现 bootstrap.Server 接口。
 type Server struct {
-	Config *config.Config
+	Config   *config.Config
+	listener net.Listener
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+	closed   bool
 }
 
 // New 创建服务。
@@ -19,24 +27,79 @@ func New(cfg *config.Config) *Server {
 	return &Server{Config: cfg}
 }
 
-// Listen 监听 TCP 并接收客户端连接，为每个连接创建会话。
-func (s *Server) Listen() error {
-	ln, err := net.Listen("tcp", s.Config.Listen.Addr)
+// Start 启动服务并阻塞运行，直到 ctx 被取消或发生错误。
+func (s *Server) Start(ctx context.Context) error {
+	ln, err := net.Listen("tcp", s.Config.Proxy.Addr)
 	if err != nil {
-		return fmt.Errorf("server: listen on %s: %w", s.Config.Listen.Addr, err)
+		return fmt.Errorf("mysql proxy server: listen on %s: %w", s.Config.Proxy.Addr, err)
 	}
-	log.Printf("mysql proxy listening on %s", s.Config.Listen.Addr)
+
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
+
+	log.Printf("mysql proxy server listening on %s", s.Config.Proxy.Addr)
+
+	// ctx 取消时关闭 listener，使 Accept 退出。
+	go func() {
+		<-ctx.Done()
+		s.mu.Lock()
+		ln := s.listener
+		s.mu.Unlock()
+		if ln != nil {
+			_ = ln.Close()
+		}
+	}()
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("server: accept failed: %v", err)
-			continue
+			s.mu.Lock()
+			closed := s.closed
+			s.mu.Unlock()
+			if closed || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			// 临时错误则短暂等待后继续。
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Temporary() {
+				time.Sleep(time.Millisecond * 5)
+				continue
+			}
+			return fmt.Errorf("mysql proxy server: accept: %w", err)
 		}
 
+		s.wg.Add(1)
 		go func() {
+			defer s.wg.Done()
 			sess := session.New(conn, s.Config)
 			sess.Run()
 		}()
+	}
+}
+
+// Stop 停止 Accept 并等待已存在的 Session 结束，在 ctx 超时前完成清理。
+func (s *Server) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	s.closed = true
+	ln := s.listener
+	s.mu.Unlock()
+
+	if ln != nil {
+		_ = ln.Close()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Printf("mysql proxy server: stopped")
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("mysql proxy server: stop: %w", ctx.Err())
 	}
 }

@@ -24,11 +24,11 @@ type Authenticator interface {
 
 // StaticAuthenticator 基于配置文件的静态账号认证。
 type StaticAuthenticator struct {
-	cfg config.AuthConfig
+	cfg config.ProxyConfig
 }
 
 // NewStaticAuthenticator 创建基于配置的认证器。
-func NewStaticAuthenticator(cfg config.AuthConfig) *StaticAuthenticator {
+func NewStaticAuthenticator(cfg config.ProxyConfig) *StaticAuthenticator {
 	return &StaticAuthenticator{cfg: cfg}
 }
 
@@ -50,7 +50,7 @@ func (a *StaticAuthenticator) Authenticate(username string, authResponse, scramb
 	passOK := subtle.ConstantTimeCompare(authResponse, expected)
 
 	if passOK != 1 {
-		return errors.New("auth: invalid password")
+		return errors.New("invalid password")
 	}
 	return nil
 }
@@ -59,7 +59,7 @@ func (a *StaticAuthenticator) Authenticate(username string, authResponse, scramb
 func (a *StaticAuthenticator) VerifyUsername(username string) error {
 	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.cfg.Username))
 	if userOK != 1 {
-		return errors.New("auth: invalid username")
+		return errors.New("invalid username")
 	}
 	return nil
 }
@@ -71,7 +71,7 @@ func (a *StaticAuthenticator) VerifyPassword(username, password string) error {
 	}
 	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.cfg.Password))
 	if passOK != 1 {
-		return errors.New("auth: invalid password")
+		return errors.New("invalid password")
 	}
 	return nil
 }

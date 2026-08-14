@@ -30,7 +30,7 @@ func New(client net.Conn, cfg *config.Config) *Session {
 	return &Session{
 		Client:    client,
 		cfg:       cfg,
-		auth:      auth.NewStaticAuthenticator(cfg.Auth),
+		auth:      auth.NewStaticAuthenticator(cfg.Proxy),
 		connector: backend.NewConnector(cfg.MySQL),
 	}
 }
@@ -98,7 +98,8 @@ func (s *Session) authenticate() error {
 	}
 
 	// 尝试 fast auth：比较 token。
-	if err := s.auth.Authenticate(username, authResponse, s.scramble, authPlugin); err == nil {
+	authErr := s.auth.Authenticate(username, authResponse, s.scramble, authPlugin)
+	if authErr == nil {
 		return nil
 	}
 
@@ -107,7 +108,7 @@ func (s *Session) authenticate() error {
 		return s.clientFullAuth(username)
 	}
 
-	return fmt.Errorf("auth failed: %w", err)
+	return fmt.Errorf("auth failed: %w", authErr)
 }
 
 // clientFullAuth 执行 caching_sha2_password 的完整认证（服务端角色）：

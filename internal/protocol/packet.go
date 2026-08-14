@@ -59,7 +59,7 @@ func WritePacket(w io.Writer, seq uint8, payload []byte) error {
 
 func writeChunk(w io.Writer, seq uint8, chunk []byte) error {
 	if len(chunk) > maxPacketSize {
-		return fmt.Errorf("protocol: chunk too large: %d", len(chunk))
+		return fmt.Errorf("chunk too large: %d", len(chunk))
 	}
 
 	header := make([]byte, headerSize)

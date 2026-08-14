@@ -1,2 +1,6 @@
+github.com/smartwalle/bootstrap v0.0.2 h1:PgHb4Y+YodLWC2Mmm6bTAMxaqLJw4dfIxm6q2IPLr4Y=
+github.com/smartwalle/bootstrap v0.0.2/go.mod h1:osn3ROaLTw2P6CaL4XrVVoTlR89dTxZc8cLZ/SbMWWQ=
 github.com/smartwalle/dotenv v0.0.2 h1:G254Exap7qvoqBUlfTqA2FbyZPQM989Pq2qgeR81OxA=
 github.com/smartwalle/dotenv v0.0.2/go.mod h1:INASjIQnI0WoznQxUPijuWUC2E4lMQGEcYgJwvt4Ysg=
+github.com/smartwalle/routine v0.0.1 h1:xUjt4Iemb7QzeIZcmTtvj5DEcGjgFp//Nj4+pvLzCEU=
+github.com/smartwalle/routine v0.0.1/go.mod h1:+ZjGuvKz/66z25IzjN0wIBvTN9b+2sf6vn9KFi1T4Zs=

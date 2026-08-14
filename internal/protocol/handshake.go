@@ -139,7 +139,7 @@ type ServerHandshake struct {
 // ParseServerHandshake 从服务端握手包 payload 中提取 scramble、认证插件与能力标志。
 func ParseServerHandshake(payload []byte) (*ServerHandshake, error) {
 	if len(payload) < 1 || payload[0] != 0x0a {
-		return nil, errors.New("protocol: not a protocol 10 handshake")
+		return nil, errors.New("not a protocol 10 handshake")
 	}
 
 	pos := 1
@@ -152,7 +152,7 @@ func ParseServerHandshake(payload []byte) (*ServerHandshake, error) {
 	pos += 4 // connection id
 
 	if pos+8 > len(payload) {
-		return nil, errors.New("protocol: handshake too short")
+		return nil, errors.New("handshake too short")
 	}
 	part1 := payload[pos : pos+8]
 	pos += 8
@@ -173,7 +173,7 @@ func ParseServerHandshake(payload []byte) (*ServerHandshake, error) {
 	pos += 10 // reserved
 
 	if pos+12 > len(payload) {
-		return nil, errors.New("protocol: handshake part2 too short")
+		return nil, errors.New("handshake part2 too short")
 	}
 	part2 := payload[pos : pos+12]
 	pos += 13 // part2 共 13 字节（12 有效 + 1 结尾 0x00）
@@ -244,7 +244,7 @@ func BuildHandshakeResponse(username, password string, scramble []byte, database
 // 返回顺序：username, authResponse, database, authPlugin。
 func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, error) {
 	if len(payload) < 32 {
-		return "", nil, "", "", errors.New("protocol: handshake response too short")
+		return "", nil, "", "", errors.New("handshake response too short")
 	}
 
 	pos := 0
@@ -283,7 +283,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 		var ok bool
 		authLen, pos, ok = readLengthEncodedInt(payload, pos)
 		if !ok || pos+int(authLen) > len(payload) {
-			return "", nil, "", "", errors.New("protocol: invalid auth response length")
+			return "", nil, "", "", errors.New("invalid auth response length")
 		}
 		authResponse = payload[pos : pos+int(authLen)]
 		pos += int(authLen)
@@ -293,7 +293,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 		authLen := int(payload[pos])
 		pos++
 		if pos+authLen > len(payload) {
-			return "", nil, "", "", errors.New("protocol: invalid auth response length")
+			return "", nil, "", "", errors.New("invalid auth response length")
 		}
 		authResponse = payload[pos : pos+authLen]
 		pos += authLen
@@ -381,7 +381,7 @@ func readNullTerminated(b []byte) (string, int, error) {
 			return string(b[:i]), i + 1, nil
 		}
 	}
-	return "", 0, errors.New("protocol: unterminated string")
+	return "", 0, errors.New("unterminated string")
 }
 
 // readLengthEncodedInt 读取 length-encoded integer，返回其值和下一个读取位置。

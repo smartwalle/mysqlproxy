@@ -77,17 +77,17 @@ func CachingSHA2EncryptPassword(password string, scramble []byte, pubKey *rsa.Pu
 func ParsePublicKey(pemData []byte) (*rsa.PublicKey, error) {
 	block, _ := pem.Decode(pemData)
 	if block == nil {
-		return nil, errors.New("protocol: failed to decode PEM public key")
+		return nil, errors.New("failed to decode PEM public key")
 	}
 
 	if block.Type == "PUBLIC KEY" {
 		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("protocol: parse PKIX public key: %w", err)
+			return nil, fmt.Errorf("parse PKIX public key: %w", err)
 		}
 		rsaPub, ok := pub.(*rsa.PublicKey)
 		if !ok {
-			return nil, errors.New("protocol: public key is not RSA")
+			return nil, errors.New("public key is not RSA")
 		}
 		return rsaPub, nil
 	}
@@ -97,7 +97,7 @@ func ParsePublicKey(pemData []byte) (*rsa.PublicKey, error) {
 		return x509.ParsePKCS1PublicKey(block.Bytes)
 	}
 
-	return nil, fmt.Errorf("protocol: unsupported public key type %q", block.Type)
+	return nil, fmt.Errorf("unsupported public key type %q", block.Type)
 }
 
 // EncodePublicKey 将 RSA 公钥编码为 PEM 格式（服务端返回给客户端的公钥）。
@@ -114,13 +114,13 @@ func EncodePublicKey(pub *rsa.PublicKey) []byte {
 func CachingSHA2DecryptPassword(ciphertext []byte, scramble []byte, privKey *rsa.PrivateKey) (string, error) {
 	plain, err := rsa.DecryptPKCS1v15(rand.Reader, privKey, ciphertext)
 	if err != nil {
-		return "", fmt.Errorf("protocol: rsa decrypt: %w", err)
+		return "", fmt.Errorf("rsa decrypt: %w", err)
 	}
 
 	// 去 XOR 混淆：明文 = XOR(password + 0x00, scramble)
 	n := len(plain)
 	if n == 0 {
-		return "", errors.New("protocol: empty decrypted password")
+		return "", errors.New("empty decrypted password")
 	}
 	// 最后一个字节为 0x00 终止符（去混淆后）。
 	passLen := n - 1

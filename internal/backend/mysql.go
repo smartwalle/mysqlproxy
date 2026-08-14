@@ -19,10 +19,9 @@ func NewConnector(cfg config.MySQLConfig) *Connector {
 
 // Connect 建立到后端 MySQL 的 TCP 连接。
 func (c *Connector) Connect() (net.Conn, error) {
-	addr := net.JoinHostPort(c.Config.Host, c.Config.Port)
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.Dial("tcp", c.Config.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("backend: connect to %s: %w", addr, err)
+		return nil, fmt.Errorf("connect to %s: %w", c.Config.Addr, err)
 	}
 	return conn, nil
 }
