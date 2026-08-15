@@ -1,4 +1,4 @@
-package server
+package mysqlproxy
 
 import (
 	"context"
@@ -8,14 +8,11 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/smartwalle/mysqlproxy/internal/config"
-	"github.com/smartwalle/mysqlproxy/internal/session"
 )
 
 // Server TCP 代理服务，实现 bootstrap.Server 接口。
 type Server struct {
-	Config   *config.Config
+	Config   *Config
 	listener net.Listener
 	wg       sync.WaitGroup
 	mu       sync.Mutex
@@ -23,7 +20,7 @@ type Server struct {
 }
 
 // New 创建服务。
-func New(cfg *config.Config) *Server {
+func New(cfg *Config) *Server {
 	return &Server{Config: cfg}
 }
 
@@ -72,7 +69,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			sess := session.New(conn, s.Config)
+			sess := NewSession(conn, s.Config)
 			sess.Run()
 		}()
 	}

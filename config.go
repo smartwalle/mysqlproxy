@@ -1,4 +1,4 @@
-package config
+package mysqlproxy
 
 import (
 	"fmt"
@@ -26,8 +26,8 @@ type MySQLConfig struct {
 	Password string
 }
 
-// Load 从 .env 文件读取配置，缺失必要项时返回错误。
-func Load() (*Config, error) {
+// LoadConfig 从 .env 文件读取配置，缺失必要项时返回错误。
+func LoadConfig() (*Config, error) {
 	env, err := dotenv.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load .env: %w", err)

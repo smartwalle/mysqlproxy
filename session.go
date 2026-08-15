@@ -1,4 +1,4 @@
-package session
+package mysqlproxy
 
 import (
 	"fmt"
@@ -8,7 +8,6 @@ import (
 
 	"github.com/smartwalle/mysqlproxy/internal/auth"
 	"github.com/smartwalle/mysqlproxy/internal/backend"
-	"github.com/smartwalle/mysqlproxy/internal/config"
 	"github.com/smartwalle/mysqlproxy/internal/protocol"
 )
 
@@ -19,19 +18,26 @@ type Session struct {
 	Username string
 	Database string
 
-	cfg       *config.Config
+	cfg       *Config
 	auth      auth.Authenticator
 	connector *backend.Connector
 	scramble  []byte // 握手阶段生成的随机数，用于认证校验
 }
 
-// New 创建会话。
-func New(client net.Conn, cfg *config.Config) *Session {
+// NewSession 创建会话。
+func NewSession(client net.Conn, cfg *Config) *Session {
 	return &Session{
-		Client:    client,
-		cfg:       cfg,
-		auth:      auth.NewStaticAuthenticator(cfg.Proxy),
-		connector: backend.NewConnector(cfg.MySQL),
+		Client: client,
+		cfg:    cfg,
+		auth: auth.NewStaticAuthenticator(
+			cfg.Proxy.Username,
+			cfg.Proxy.Password,
+		),
+		connector: backend.NewConnector(
+			cfg.MySQL.Addr,
+			cfg.MySQL.Username,
+			cfg.MySQL.Password,
+		),
 	}
 }
 

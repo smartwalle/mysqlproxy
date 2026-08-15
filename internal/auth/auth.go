@@ -4,7 +4,6 @@ import (
 	"crypto/subtle"
 	"errors"
 
-	"github.com/smartwalle/mysqlproxy/internal/config"
 	"github.com/smartwalle/mysqlproxy/internal/protocol"
 )
 
@@ -22,14 +21,15 @@ type Authenticator interface {
 	VerifyPassword(username, password string) error
 }
 
-// StaticAuthenticator 基于配置文件的静态账号认证。
+// StaticAuthenticator 基于静态账号的认证。
 type StaticAuthenticator struct {
-	cfg config.ProxyConfig
+	username string
+	password string
 }
 
-// NewStaticAuthenticator 创建基于配置的认证器。
-func NewStaticAuthenticator(cfg config.ProxyConfig) *StaticAuthenticator {
-	return &StaticAuthenticator{cfg: cfg}
+// NewStaticAuthenticator 创建基于静态账号的认证器。
+func NewStaticAuthenticator(username, password string) *StaticAuthenticator {
+	return &StaticAuthenticator{username: username, password: password}
 }
 
 // Authenticate 校验用户名与密码 token 是否与配置一致。
@@ -43,9 +43,9 @@ func (a *StaticAuthenticator) Authenticate(username string, authResponse, scramb
 	// 因此这里用代理配置的密码按相同算法计算 token 后比较。
 	var expected []byte
 	if authPlugin == protocol.AuthCachingSHA2Password {
-		expected = protocol.ComputeCachingSHA2Token(a.cfg.Password, scramble)
+		expected = protocol.ComputeCachingSHA2Token(a.password, scramble)
 	} else {
-		expected = protocol.ComputePasswordToken(a.cfg.Password, scramble)
+		expected = protocol.ComputePasswordToken(a.password, scramble)
 	}
 	passOK := subtle.ConstantTimeCompare(authResponse, expected)
 
@@ -57,7 +57,7 @@ func (a *StaticAuthenticator) Authenticate(username string, authResponse, scramb
 
 // VerifyUsername 校验用户名是否与配置一致。
 func (a *StaticAuthenticator) VerifyUsername(username string) error {
-	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.cfg.Username))
+	userOK := subtle.ConstantTimeCompare([]byte(username), []byte(a.username))
 	if userOK != 1 {
 		return errors.New("invalid username")
 	}
@@ -69,7 +69,7 @@ func (a *StaticAuthenticator) VerifyPassword(username, password string) error {
 	if err := a.VerifyUsername(username); err != nil {
 		return err
 	}
-	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.cfg.Password))
+	passOK := subtle.ConstantTimeCompare([]byte(password), []byte(a.password))
 	if passOK != 1 {
 		return errors.New("invalid password")
 	}
