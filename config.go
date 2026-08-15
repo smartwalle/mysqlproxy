@@ -27,10 +27,13 @@ type MySQLConfig struct {
 }
 
 // LoadConfig 从 .env 文件读取配置，缺失必要项时返回错误。
-func LoadConfig() (*Config, error) {
-	env, err := dotenv.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load .env: %w", err)
+func LoadConfig(env *dotenv.Env) (*Config, error) {
+	if env == nil {
+		var err error
+		env, err = dotenv.Load()
+		if err != nil {
+			return nil, fmt.Errorf("load .env: %w", err)
+		}
 	}
 
 	cfg := &Config{

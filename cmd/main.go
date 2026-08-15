@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	cfg, err := mysqlproxy.LoadConfig()
+	cfg, err := mysqlproxy.LoadConfig(nil)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
