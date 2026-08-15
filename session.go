@@ -1,10 +1,12 @@
 package mysqlproxy
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/smartwalle/mysqlproxy/internal/auth"
 	"github.com/smartwalle/mysqlproxy/internal/backend"
@@ -86,6 +88,12 @@ func (s *Session) handshake() error {
 
 // authenticate 读取客户端握手响应，校验代理账号。
 func (s *Session) authenticate() error {
+	// 设置认证超时 deadline。
+	if s.cfg.Connection.AuthTimeout > 0 {
+		_ = s.Client.SetReadDeadline(time.Now().Add(s.cfg.Connection.AuthTimeout))
+		defer func() { _ = s.Client.SetReadDeadline(time.Time{}) }()
+	}
+
 	pkt, err := protocol.ReadPacket(s.Client)
 	if err != nil {
 		return fmt.Errorf("read handshake response: %w", err)
@@ -99,7 +107,7 @@ func (s *Session) authenticate() error {
 	s.Database = database
 
 	// 先校验用户名（无论插件）。
-	if err := s.auth.VerifyUsername(username); err != nil {
+	if err = s.auth.VerifyUsername(username); err != nil {
 		return err
 	}
 
@@ -142,7 +150,7 @@ func (s *Session) clientFullAuth(username string) error {
 	}
 	pubPEM := protocol.EncodePublicKey(&privKey.PublicKey)
 	keyPacket := append([]byte{protocol.CachingSHA2AuthMoreData}, pubPEM...)
-	if err := protocol.WritePacket(s.Client, 4, keyPacket); err != nil {
+	if err = protocol.WritePacket(s.Client, 4, keyPacket); err != nil {
 		return fmt.Errorf("write public key: %w", err)
 	}
 
@@ -167,11 +175,21 @@ func (s *Session) clientFullAuth(username string) error {
 // 根据后端握手包声明的 auth-plugin-name 自动选择算法；caching_sha2 缓存
 // 未命中时执行 full auth（请求公钥 + RSA 加密密码）。
 func (s *Session) connectBackend() error {
-	conn, err := s.connector.Connect()
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Connection.ConnectTimeout)
+	defer cancel()
+
+	conn, err := s.connector.Connect(ctx)
 	if err != nil {
 		return err
 	}
 	s.Backend = conn
+
+	// 后端握手认证阶段使用 AUTH_TIMEOUT 独立起算，覆盖 full auth 的多轮交互，
+	// 避免无限等待。认证超时与连接超时相互独立。
+	if s.cfg.Connection.AuthTimeout > 0 {
+		_ = s.Backend.SetDeadline(time.Now().Add(s.cfg.Connection.AuthTimeout))
+		defer func() { _ = s.Backend.SetDeadline(time.Time{}) }()
+	}
 
 	// 1. 读后端握手包。
 	pkt, err := protocol.ReadPacket(s.Backend)
@@ -200,7 +218,7 @@ func (s *Session) connectBackend() error {
 	)
 
 	// 4. 发送认证响应（sequence 1）。
-	if err := protocol.WritePacket(s.Backend, 1, authResp); err != nil {
+	if err = protocol.WritePacket(s.Backend, 1, authResp); err != nil {
 		return fmt.Errorf("write backend auth response: %w", err)
 	}
 
@@ -217,7 +235,7 @@ func (s *Session) connectBackend() error {
 	if len(result.Payload) >= 2 &&
 		result.Payload[0] == protocol.CachingSHA2AuthMoreData &&
 		result.Payload[1] == protocol.CachingSHA2PerformFullAuth {
-		if err := s.backendFullAuth(hs.Scramble); err != nil {
+		if err = s.backendFullAuth(hs.Scramble); err != nil {
 			return err
 		}
 	} else if result.Payload[0] != 0x00 {
@@ -257,7 +275,7 @@ func (s *Session) backendFullAuth(scramble []byte) error {
 	}
 
 	// 发送加密后的密码。
-	if err := protocol.WritePacket(s.Backend, 4, encrypted); err != nil {
+	if err = protocol.WritePacket(s.Backend, 4, encrypted); err != nil {
 		return fmt.Errorf("write encrypted password: %w", err)
 	}
 

@@ -2,14 +2,16 @@ package mysqlproxy
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/smartwalle/dotenv"
 )
 
-// Config 顶层配置，代理监听、代理认证、后端 MySQL 三部分分离。
+// Config 顶层配置，代理监听、代理认证、后端 MySQL、连接超时四部分分离。
 type Config struct {
-	Proxy ProxyConfig
-	MySQL MySQLConfig
+	Proxy      ProxyConfig
+	MySQL      MySQLConfig
+	Connection ConnectionConfig
 }
 
 // ProxyConfig 代理自己的监听与访问账号。
@@ -24,6 +26,12 @@ type MySQLConfig struct {
 	Addr     string
 	Username string
 	Password string
+}
+
+// ConnectionConfig 连接相关超时配置。
+type ConnectionConfig struct {
+	ConnectTimeout time.Duration
+	AuthTimeout    time.Duration
 }
 
 // LoadConfig 从 .env 文件读取配置，缺失必要项时返回错误。
@@ -47,6 +55,10 @@ func LoadConfig(env *dotenv.Env) (*Config, error) {
 			Username: env.Get("MYSQL_USERNAME"),
 			Password: env.Get("MYSQL_PASSWORD"),
 		},
+		Connection: ConnectionConfig{
+			ConnectTimeout: env.EnsureDuration("MYSQL_CONNECT_TIMEOUT", 5*time.Second),
+			AuthTimeout:    env.EnsureDuration("MYSQL_AUTH_TIMEOUT", 5*time.Second),
+		},
 	}
 
 	if cfg.Proxy.Addr == "" {
@@ -63,6 +75,14 @@ func LoadConfig(env *dotenv.Env) (*Config, error) {
 	}
 	if cfg.MySQL.Username == "" {
 		return nil, fmt.Errorf("MYSQL_USERNAME is required")
+	}
+
+	// 校验超时配置的合法性。
+	if cfg.Connection.ConnectTimeout < 0 {
+		return nil, fmt.Errorf("MYSQL_CONNECT_TIMEOUT must be >= 0")
+	}
+	if cfg.Connection.AuthTimeout < 0 {
+		return nil, fmt.Errorf("MYSQL_AUTH_TIMEOUT must be >= 0")
 	}
 
 	return cfg, nil
