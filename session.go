@@ -47,22 +47,31 @@ func NewSession(client net.Conn, cfg *Config) *Session {
 func (s *Session) Run() {
 	defer s.Close()
 
+	remote := ""
+	if s.Client != nil && s.Client.RemoteAddr() != nil {
+		remote = s.Client.RemoteAddr().String()
+	}
+	log.Printf("session: new connection from %s", remote)
+	defer log.Printf("session: connection closed from %s", remote)
+
 	if err := s.handshake(); err != nil {
-		log.Printf("session: handshake failed: %v", err)
+		log.Printf("session: handshake failed remote=%s: %v", remote, err)
 		return
 	}
 
 	if err := s.authenticate(); err != nil {
-		log.Printf("session: auth failed for %q: %v", s.Username, err)
+		log.Printf("session: auth failed remote=%s user=%q: %v", remote, s.Username, err)
 		s.sendErr(0x0f28, "28000", "Access denied for proxy")
 		return
 	}
 
 	if err := s.connectBackend(); err != nil {
-		log.Printf("session: backend connect failed: %v", err)
+		log.Printf("session: backend connect failed remote=%s: %v", remote, err)
 		s.sendErr(0x07d1, "HY000", "Proxy cannot connect to backend")
 		return
 	}
+
+	log.Printf("session: authenticated remote=%s user=%q database=%q backend connected", remote, s.Username, s.Database)
 
 	// 认证成功，向客户端回 OK 包（sequence 2）。
 	s.sendOK()
