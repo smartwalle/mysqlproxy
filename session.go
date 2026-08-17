@@ -2,9 +2,13 @@ package mysqlproxy
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -51,27 +55,27 @@ func (s *Session) Run() {
 	if s.Client != nil && s.Client.RemoteAddr() != nil {
 		remote = s.Client.RemoteAddr().String()
 	}
-	log.Printf("session: new connection from %s", remote)
-	defer log.Printf("session: connection closed from %s", remote)
+	log.Printf("mysql session: new connection from %s", remote)
+	defer log.Printf("mysql session: connection closed from %s", remote)
 
 	if err := s.handshake(); err != nil {
-		log.Printf("session: handshake failed remote=%s: %v", remote, err)
+		log.Printf("mysql session: handshake failed remote=%s: %v", remote, err)
 		return
 	}
 
 	if err := s.authenticate(); err != nil {
-		log.Printf("session: auth failed remote=%s user=%q: %v", remote, s.Username, err)
+		log.Printf("mysql session: auth failed remote=%s user=%q: %v", remote, s.Username, err)
 		s.sendErr(0x0f28, "28000", "Access denied for proxy")
 		return
 	}
 
 	if err := s.connectBackend(); err != nil {
-		log.Printf("session: backend connect failed remote=%s: %v", remote, err)
+		log.Printf("mysql session: backend connect failed remote=%s: %v", remote, err)
 		s.sendErr(0x07d1, "HY000", "Proxy cannot connect to backend")
 		return
 	}
 
-	log.Printf("session: authenticated remote=%s user=%q database=%q backend connected", remote, s.Username, s.Database)
+	log.Printf("mysql session: authenticated remote=%s user=%q database=%q backend connected", remote, s.Username, s.Database)
 
 	// 认证成功，向客户端回 OK 包（sequence 2）。
 	s.sendOK()
@@ -96,6 +100,9 @@ func (s *Session) handshake() error {
 }
 
 // authenticate 读取客户端握手响应，校验代理账号。
+//
+// 支持 SSL 协商：若客户端握手响应带 CLIENT_SSL 位，则在认证前先将连接
+// 升级为 TLS，然后在 TLS 内重新读取真正的握手响应。
 func (s *Session) authenticate() error {
 	// 设置认证超时 deadline。
 	if s.cfg.Connection.AuthTimeout > 0 {
@@ -108,10 +115,24 @@ func (s *Session) authenticate() error {
 		return fmt.Errorf("read handshake response: %w", err)
 	}
 
-	username, authResponse, database, authPlugin, err := protocol.ParseHandshakeResponse(pkt.Payload)
+	// 客户端要求 SSL 时，第一个包是 32 字节的 SSL 请求包（仅含 capability
+	// 等头字段，无 username/auth response）。此时需先升级 TLS，再在 TLS 内
+	// 读取完整的握手响应。判断依据是 capability 的 CLIENT_SSL 位。
+	if wantsSSL(pkt.Payload) {
+		if err = s.upgradeClientTLS(); err != nil {
+			return err
+		}
+		pkt, err = protocol.ReadPacket(s.Client)
+		if err != nil {
+			return fmt.Errorf("read handshake response over tls: %w", err)
+		}
+	}
+
+	username, authResponse, database, authPlugin, _, err := protocol.ParseHandshakeResponse(pkt.Payload)
 	if err != nil {
 		return err
 	}
+
 	s.Username = username
 	s.Database = database
 
@@ -132,6 +153,90 @@ func (s *Session) authenticate() error {
 	}
 
 	return fmt.Errorf("auth failed: %w", authErr)
+}
+
+// wantsSSL 判断客户端握手响应是否要求 SSL 升级。
+//
+// 客户端要求 SSL 时，第一个包是 32 字节的 SSL 请求包：capability(4) +
+// max packet size(4) + charset(1) + reserved(23)，其中 capability 带
+// CLIENT_SSL 位，且不包含 username/auth response。因此只需读取前 4 字节
+// capability 判断，不能用 ParseHandshakeResponse 完整解析（会因缺少
+// username 而报错）。
+func wantsSSL(payload []byte) bool {
+	if len(payload) < 4 {
+		return false
+	}
+	capability := binary.LittleEndian.Uint32(payload[:4])
+	return capability&protocol.ClientSSL != 0
+}
+
+// upgradeClientTLS 将客户端连接升级为 TLS（代理作为服务端）。
+func (s *Session) upgradeClientTLS() error {
+	tlsConfig, err := protocol.GetServerTLSConfig()
+	if err != nil {
+		return fmt.Errorf("get server tls config: %w", err)
+	}
+	tlsConn := tls.Server(s.Client, tlsConfig)
+	if err = tlsConn.Handshake(); err != nil {
+		return fmt.Errorf("client tls handshake: %w", err)
+	}
+	s.Client = tlsConn
+	log.Printf("mysql session: client TLS established")
+	return nil
+}
+
+// upgradeBackendTLS 将后端连接升级为 TLS（代理作为客户端）。
+//
+// 证书校验策略（按优先级）：
+//  1. 配置了 MYSQL_TLS_CA：用该 CA 证书严格校验后端证书（忽略 SkipVerify）。
+//  2. 未配置 CA 且 MYSQL_TLS_SKIP_VERIFY=true：跳过证书校验。
+//  3. 未配置 CA 且 MYSQL_TLS_SKIP_VERIFY=false：用系统默认根证书严格校验。
+func (s *Session) upgradeBackendTLS() error {
+	serverName := s.cfg.MySQL.Addr
+	if host, _, err := net.SplitHostPort(serverName); err == nil {
+		serverName = host
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	switch {
+	case s.cfg.MySQL.TLSCA != "":
+		pool, err := loadCertPool(s.cfg.MySQL.TLSCA)
+		if err != nil {
+			return err
+		}
+		tlsConfig.RootCAs = pool
+
+	case s.cfg.MySQL.TLSSkipVerify:
+		tlsConfig.InsecureSkipVerify = true // 由配置显式控制
+
+	default:
+		// 用系统默认根证书，RootCAs 与 InsecureSkipVerify 均保持零值。
+	}
+
+	tlsConn := tls.Client(s.Backend, tlsConfig)
+	if err := tlsConn.Handshake(); err != nil {
+		return fmt.Errorf("backend tls handshake: %w", err)
+	}
+	s.Backend = tlsConn
+	log.Printf("mysql session: backend TLS established")
+	return nil
+}
+
+// loadCertPool 读取 PEM 格式的 CA 证书文件并构造证书池。
+func loadCertPool(path string) (*x509.CertPool, error) {
+	pemData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read tls ca cert: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("tls ca cert contains no valid certificate: %s", path)
+	}
+	return pool, nil
 }
 
 // clientFullAuth 执行 caching_sha2_password 的完整认证（服务端角色）：
@@ -217,12 +322,23 @@ func (s *Session) connectBackend() error {
 		authPlugin = protocol.AuthNativePassword
 	}
 
-	// 3. 构造认证响应包，用真实 MySQL 账号密码。
+	// 后端声明支持 SSL：先发 32 字节 SSL 请求包，再升级 TLS。
+	// 是否真正启用由后端握手包决定（此处据此判断，与客户端侧一致）。
+	if hs.Capability&protocol.ClientSSL != 0 {
+		if err = protocol.WritePacket(s.Backend, 1, protocol.BuildSSLRequest()); err != nil {
+			return fmt.Errorf("write ssl request: %w", err)
+		}
+		if err = s.upgradeBackendTLS(); err != nil {
+			return err
+		}
+	}
+
+	// 3. 构造认证响应包，用真实 MySQL 账号密码，并透传客户端指定的数据库。
 	authResp := protocol.BuildHandshakeResponse(
 		s.cfg.MySQL.Username,
 		s.cfg.MySQL.Password,
 		hs.Scramble,
-		"",
+		s.Database,
 		authPlugin,
 	)
 

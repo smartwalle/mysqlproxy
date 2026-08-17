@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"github.com/smartwalle/bootstrap"
 	"github.com/smartwalle/mysqlproxy"
@@ -15,6 +16,7 @@ func main() {
 
 	app := bootstrap.New(
 		bootstrap.WithServers(mysqlproxy.New(cfg)),
+		bootstrap.WithStopTimeout(time.Second),
 	)
 	if err = app.Run(); err != nil {
 		log.Fatalf("run application: %v", err)

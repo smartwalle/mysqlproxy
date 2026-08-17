@@ -20,7 +20,7 @@ const (
 	clientLongFlag                   = 0x00000004
 	clientConnectWithDB              = 0x00000008
 	clientProtocol41                 = 0x00000200
-	clientSSL                        = 0x00000800
+	ClientSSL                        = 0x00000800
 	clientTransactions               = 0x00002000
 	clientSecureConn                 = 0x00008000
 	clientMultiStatements            = 0x00010000
@@ -35,14 +35,17 @@ const (
 // serverCapabilities 代理对外（作为服务端）声明的能力集合。
 //
 // 参考真实 MySQL 后端的能力（0x003baa0f），排除代理暂不支持的特性：
-//   - clientSSL：代理不做 TLS 终结，客户端与后端的 SSL 需单独处理
 //   - clientCompress：不支持压缩协议
 //   - clientLocalFiles：不支持 LOAD DATA LOCAL INFILE
+//
+// 声明 clientSSL：代理支持 TLS，但是否真正启用由客户端握手响应决定
+// （若客户端响应带 CLIENT_SSL 位则升级 TLS，否则走明文）。
 const serverCapabilities = clientLongPassword |
 	clientFoundRows |
 	clientLongFlag |
 	clientConnectWithDB |
 	clientProtocol41 |
+	ClientSSL |
 	clientTransactions |
 	clientSecureConn |
 	clientMultiStatements |
@@ -54,12 +57,13 @@ const serverCapabilities = clientLongPassword |
 
 // clientCapabilities 代理作为客户端连后端时声明的能力集合。
 //
-// 与 serverCapabilities 基本一致；代理自身不需要 SSL/压缩/本地文件，
-// 因此也不声明这些能力。
+// 与 serverCapabilities 基本一致；代理声明 clientSSL 表示支持 TLS，
+// 是否真正启用由后端握手包决定（后端声明 CLIENT_SSL 时升级 TLS）。
 const clientCapabilities = clientLongPassword |
 	clientFoundRows |
 	clientLongFlag |
 	clientProtocol41 |
+	ClientSSL |
 	clientTransactions |
 	clientSecureConn |
 	clientMultiStatements |
@@ -239,12 +243,28 @@ func BuildHandshakeResponse(username, password string, scramble []byte, database
 	return payload
 }
 
-// ParseHandshakeResponse 解析客户端握手响应包，返回用户名、认证数据、数据库名与认证插件名。
+// BuildSSLRequest 构造 32 字节的 SSL 请求包。
 //
-// 返回顺序：username, authResponse, database, authPlugin。
-func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, error) {
+// 当客户端（或代理作为客户端）要求 SSL 时，先发送此包声明 CLIENT_SSL，
+// 服务端收到后立即发起 TLS 握手；TLS 建立后再发送完整握手响应。此包
+// 仅含 capability(4) + max packet size(4) + charset(1) + reserved(23)，
+// 不含 username 与 auth response。
+func BuildSSLRequest() []byte {
+	capability := uint32(clientCapabilities) | ClientSSL
+	payload := make([]byte, 0, 32)
+	payload = binary.LittleEndian.AppendUint32(payload, capability)         // capability (4)
+	payload = binary.LittleEndian.AppendUint32(payload, maxPacketSizeValue) // max packet size (4)
+	payload = append(payload, 0x21)                                         // charset: utf8mb4_general_ci
+	payload = append(payload, make([]byte, 23)...)                          // reserved (23)
+	return payload
+}
+
+// ParseHandshakeResponse 解析客户端握手响应包，返回用户名、认证数据、数据库名、认证插件名与客户端能力标志。
+//
+// 返回顺序：username, authResponse, database, authPlugin, capability。
+func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, uint32, error) {
 	if len(payload) < 32 {
-		return "", nil, "", "", errors.New("handshake response too short")
+		return "", nil, "", "", 0, errors.New("handshake response too short")
 	}
 
 	pos := 0
@@ -265,7 +285,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 	// username (null-terminated)
 	username, n, err := readNullTerminated(payload[pos:])
 	if err != nil {
-		return "", nil, "", "", err
+		return "", nil, "", "", 0, err
 	}
 	pos += n
 
@@ -283,7 +303,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 		var ok bool
 		authLen, pos, ok = readLengthEncodedInt(payload, pos)
 		if !ok || pos+int(authLen) > len(payload) {
-			return "", nil, "", "", errors.New("invalid auth response length")
+			return "", nil, "", "", 0, errors.New("invalid auth response length")
 		}
 		authResponse = payload[pos : pos+int(authLen)]
 		pos += int(authLen)
@@ -293,7 +313,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 		authLen := int(payload[pos])
 		pos++
 		if pos+authLen > len(payload) {
-			return "", nil, "", "", errors.New("invalid auth response length")
+			return "", nil, "", "", 0, errors.New("invalid auth response length")
 		}
 		authResponse = payload[pos : pos+authLen]
 		pos += authLen
@@ -303,7 +323,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 		var authStr string
 		authStr, n, err = readNullTerminated(payload[pos:])
 		if err != nil {
-			return "", nil, "", "", err
+			return "", nil, "", "", 0, err
 		}
 		authResponse = []byte(authStr)
 		pos += n
@@ -313,7 +333,7 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 	if capability&clientConnectWithDB != 0 && pos < len(payload) {
 		database, n, err = readNullTerminated(payload[pos:])
 		if err != nil {
-			return "", nil, "", "", err
+			return "", nil, "", "", 0, err
 		}
 		pos += n
 	}
@@ -322,11 +342,11 @@ func ParseHandshakeResponse(payload []byte) (string, []byte, string, string, err
 	if capability&clientPluginAuth != 0 && pos < len(payload) {
 		authPlugin, _, err = readNullTerminated(payload[pos:])
 		if err != nil {
-			return "", nil, "", "", err
+			return "", nil, "", "", 0, err
 		}
 	}
 
-	return username, authResponse, database, authPlugin, nil
+	return username, authResponse, database, authPlugin, capability, nil
 }
 
 // ComputePasswordToken 计算 mysql_native_password 的认证 token：
