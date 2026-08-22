@@ -55,27 +55,27 @@ func (s *Session) Run() {
 	if s.Client != nil && s.Client.RemoteAddr() != nil {
 		remote = s.Client.RemoteAddr().String()
 	}
-	slog.Info("new connection", "remote", remote)
-	defer slog.Info("connection closed", "remote", remote)
+	slog.Info("mysql session: new connection", "remote", remote)
+	defer slog.Info("mysql session: connection closed", "remote", remote)
 
 	if err := s.handshake(); err != nil {
-		slog.Error("handshake failed", "remote", remote, "error", err)
+		slog.Error("mysql session: handshake failed", "remote", remote, "error", err)
 		return
 	}
 
 	if err := s.authenticate(); err != nil {
-		slog.Error("auth failed", "remote", remote, "user", s.Username, "error", err)
+		slog.Error("mysql session: auth failed", "remote", remote, "user", s.Username, "error", err)
 		s.sendErr(0x0f28, "28000", "Access denied for proxy")
 		return
 	}
 
 	if err := s.connectBackend(); err != nil {
-		slog.Error("backend connect failed", "remote", remote, "error", err)
+		slog.Error("mysql session: backend connect failed", "remote", remote, "error", err)
 		s.sendErr(0x07d1, "HY000", "Proxy cannot connect to backend")
 		return
 	}
 
-	slog.Info("authenticated", "remote", remote, "user", s.Username, "database", s.Database)
+	slog.Info("mysql session: authenticated", "remote", remote, "user", s.Username, "database", s.Database)
 
 	// 认证成功，向客户端回 OK 包（sequence 2）。
 	s.sendOK()
@@ -181,7 +181,7 @@ func (s *Session) upgradeClientTLS() error {
 		return fmt.Errorf("client tls handshake: %w", err)
 	}
 	s.Client = tlsConn
-	slog.Info("client TLS established")
+	slog.Info("mysql session: client TLS established")
 	return nil
 }
 
@@ -222,7 +222,7 @@ func (s *Session) upgradeBackendTLS() error {
 		return fmt.Errorf("backend tls handshake: %w", err)
 	}
 	s.Backend = tlsConn
-	slog.Info("backend TLS established")
+	slog.Info("mysql session: backend TLS established")
 	return nil
 }
 
