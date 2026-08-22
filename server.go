@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -35,7 +35,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.listener = ln
 	s.mu.Unlock()
 
-	log.Printf("mysql proxy server listening on %s", s.Config.Proxy.Addr)
+	slog.Info("server listening", "addr", s.Config.Proxy.Addr)
 
 	// ctx 取消时关闭 listener，使 Accept 退出。
 	go func() {
@@ -94,7 +94,7 @@ func (s *Server) Stop(ctx context.Context) error {
 
 	select {
 	case <-done:
-		log.Printf("mysql proxy server: stopped")
+		slog.Info("server stopped")
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("mysql proxy server: stop: %w", ctx.Err())

@@ -1,7 +1,8 @@
 package main
 
 import (
-	"log"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/smartwalle/bootstrap"
@@ -11,7 +12,8 @@ import (
 func main() {
 	cfg, err := mysqlproxy.LoadConfig(nil)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config failed", "error", err)
+		os.Exit(1)
 	}
 
 	app := bootstrap.New(
@@ -19,6 +21,7 @@ func main() {
 		bootstrap.WithStopTimeout(time.Second),
 	)
 	if err = app.Run(); err != nil {
-		log.Fatalf("run application: %v", err)
+		slog.Error("run application failed", "error", err)
+		os.Exit(1)
 	}
 }
